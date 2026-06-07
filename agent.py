@@ -6,62 +6,80 @@ from google import genai
 from datetime import datetime
 import pytz
 
-# ==============================
-# ENV VARIABLES
-# ==============================
+# =========================
+# CONFIG
+# =========================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ==============================
-# IST TIME
-# ==============================
+# =========================
+# TIME
+# =========================
 
 def get_indian_time():
     ist = pytz.timezone("Asia/Kolkata")
     return datetime.now(ist)
 
-# ==============================
+# =========================
+# TELEGRAM
+# =========================
+
+def send_telegram(text):
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text
+    }
+
+    try:
+        r = requests.post(url, json=payload, timeout=30)
+
+        print("Telegram Status:", r.status_code)
+        print("Telegram Response:", r.text)
+
+    except Exception as e:
+        print("Telegram Error:", e)
+
+# =========================
 # PIB RSS
-# ==============================
+# =========================
 
 def fetch_pib_news():
 
     rss_url = "https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3"
 
+    print("Checking RSS:", rss_url)
+
     feed = feedparser.parse(rss_url)
+
+    print("RSS Entries Found:", len(feed.entries))
 
     articles = []
 
-    for entry in feed.entries[:20]:
+    for item in feed.entries:
 
-        articles.append(
-            {
-                "title": entry.title,
-                "link": entry.link
-            }
-        )
-
-    print(f"PIB Articles Found: {len(articles)}")
+        articles.append({
+            "title": item.title,
+            "link": item.link
+        })
 
     return articles
 
-# ==============================
-# PRS POLICY REVIEWS
-# ==============================
+# =========================
+# PRS
+# =========================
 
 def fetch_prs_data():
-
-    print("Fetching PRS data...")
 
     url = "https://prsindia.org/policy/monthly-policy-review"
 
     headers = {
         "User-Agent": "Mozilla/5.0"
     }
-
-    reviews = []
 
     try:
 
@@ -72,56 +90,43 @@ def fetch_prs_data():
         )
 
         print("PRS Status:", response.status_code)
+        print("PRS Page Length:", len(response.text))
 
         soup = BeautifulSoup(
             response.text,
             "html.parser"
         )
 
-        links = soup.find_all(
-            "a",
-            href=True
-        )
+        links = soup.find_all("a", href=True)
+
+        data = []
 
         for link in links:
 
-            text = link.get_text(strip=True)
-
             href = link["href"]
+            title = link.get_text(strip=True)
 
-            if (
-                "monthly-policy-review" in href
-                or "/files/" in href
-            ):
+            if title and len(title) > 5:
 
-                full_url = (
-                    href
-                    if href.startswith("http")
-                    else f"https://prsindia.org{href}"
-                )
+                if (
+                    "monthly-policy-review" in href
+                    or "/files/" in href
+                ):
 
-                reviews.append(
-                    {
-                        "title": text if text else "PRS Policy Review",
+                    full_url = (
+                        href
+                        if href.startswith("http")
+                        else f"https://prsindia.org{href}"
+                    )
+
+                    data.append({
+                        "title": title,
                         "link": full_url
-                    }
-                )
+                    })
 
-        unique = []
+        print("PRS Items Found:", len(data))
 
-        seen = set()
-
-        for item in reviews:
-
-            if item["link"] not in seen:
-
-                seen.add(item["link"])
-
-                unique.append(item)
-
-        print(f"PRS Reviews Found: {len(unique)}")
-
-        return unique[:5]
+        return data[:5]
 
     except Exception as e:
 
@@ -129,70 +134,48 @@ def fetch_prs_data():
 
         return []
 
-# ==============================
-# GEMINI ANALYSIS
-# ==============================
+# =========================
+# GEMINI
+# =========================
 
-def generate_upsc_notes(
-        date_str,
-        pib_news,
-        prs_reviews
-):
+def generate_report(pib_news, prs_news):
 
-    raw_text = ""
+    raw = ""
 
-    raw_text += "===== PIB NEWS =====\n"
+    raw += "PIB NEWS\n\n"
 
-    for i, article in enumerate(
-            pib_news,
-            start=1
-    ):
+    for x in pib_news:
 
-        raw_text += (
-            f"{i}. "
-            f"{article['title']}\n"
-            f"Link: {article['link']}\n\n"
+        raw += (
+            f"Title: {x['title']}\n"
+            f"Link: {x['link']}\n\n"
         )
 
-    raw_text += "\n===== PRS REVIEWS =====\n"
+    raw += "\nPRS NEWS\n\n"
 
-    for i, article in enumerate(
-            prs_reviews,
-            start=1
-    ):
+    for x in prs_news:
 
-        raw_text += (
-            f"{i}. "
-            f"{article['title']}\n"
-            f"Link: {article['link']}\n\n"
+        raw += (
+            f"Title: {x['title']}\n"
+            f"Link: {x['link']}\n\n"
         )
 
     prompt = f"""
-You are a UPSC Current Affairs Analyst.
+Create UPSC current affairs notes.
 
-Date: {date_str}
-
-Create a structured UPSC current affairs note.
-
-Format:
-
-🔴 TODAY'S PIB CURRENT AFFAIRS
-
-For each PIB item:
+For every PIB article:
 - Heading
 - 2 line summary
-- Why important for UPSC
-
-🟣 PRS MONTHLY POLICY REVIEW
-
-For each PRS item:
-- Title
-- Brief explanation
 - UPSC relevance
 
-Raw Data:
+For every PRS review:
+- Title
+- Explanation
+- UPSC relevance
 
-{raw_text}
+Data:
+
+{raw}
 """
 
     client = genai.Client(
@@ -206,115 +189,56 @@ Raw Data:
 
     return response.text
 
-# ==============================
-# TELEGRAM
-# ==============================
-
-def send_to_telegram(message):
-
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}"
-        f"/sendMessage"
-    )
-
-    chunks = [
-        message[i:i+3900]
-        for i in range(
-            0,
-            len(message),
-            3900
-        )
-    ]
-
-    for chunk in chunks:
-
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": chunk
-        }
-
-        try:
-
-            r = requests.post(
-                url,
-                json=payload,
-                timeout=20
-            )
-
-            print(
-                "Telegram:",
-                r.status_code
-            )
-
-            print(r.text)
-
-        except Exception as e:
-
-            print(
-                "Telegram Error:",
-                e
-            )
-
-# ==============================
+# =========================
 # MAIN
-# ==============================
+# =========================
 
 if __name__ == "__main__":
 
-    print("===== STARTING UPSC AGENT =====")
+    print("=" * 50)
+    print("UPSC AGENT STARTED")
+    print("=" * 50)
 
-    print(
-        "Gemini Key Present:",
-        bool(GEMINI_API_KEY)
-    )
-
-    print(
-        "Telegram Token Present:",
-        bool(TELEGRAM_BOT_TOKEN)
-    )
-
-    print(
-        "Chat ID Present:",
-        bool(TELEGRAM_CHAT_ID)
-    )
-
-    today = get_indian_time()
-
-    date_str = today.strftime(
-        "%d-%m-%Y"
-    )
+    print("Gemini Key:", bool(GEMINI_API_KEY))
+    print("Telegram Token:", bool(TELEGRAM_BOT_TOKEN))
+    print("Telegram Chat:", bool(TELEGRAM_CHAT_ID))
 
     pib_news = fetch_pib_news()
+    prs_news = fetch_prs_data()
 
-    prs_reviews = fetch_prs_data()
+    print("=" * 50)
+    print("PIB COUNT:", len(pib_news))
+    print("PRS COUNT:", len(prs_news))
+    print("=" * 50)
 
-    if len(pib_news) == 0:
+    if len(pib_news) > 0:
+        print("FIRST PIB ARTICLE")
+        print(pib_news[0])
 
-        send_to_telegram(
-            "⚠️ No PIB news fetched."
+    if len(prs_news) > 0:
+        print("FIRST PRS ARTICLE")
+        print(prs_news[0])
+
+    # Debug Telegram
+    send_telegram(
+        f"DEBUG\nPIB={len(pib_news)}\nPRS={len(prs_news)}"
+    )
+
+    if len(pib_news) == 0 and len(prs_news) == 0:
+
+        send_telegram(
+            "No new updates found on PIB or PRS today."
         )
 
         raise Exception(
-            "PIB returned zero articles."
+            "Both PIB and PRS returned zero results."
         )
 
-    print(
-        "Generating UPSC Notes..."
-    )
-
-    report = generate_upsc_notes(
-        date_str,
+    report = generate_report(
         pib_news,
-        prs_reviews
+        prs_news
     )
 
-    print(
-        "Sending to Telegram..."
-    )
+    send_telegram(report)
 
-    send_to_telegram(report)
-
-    print(
-        "===== COMPLETED SUCCESSFULLY ====="
-    )
+    print("DONE")
