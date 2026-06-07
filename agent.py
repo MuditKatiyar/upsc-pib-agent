@@ -12,6 +12,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def get_indian_time():
+    # Forces the cloud container to always use Indian Standard Time calendar rules
     ist = pytz.timezone('Asia/Kolkata')
     return datetime.now(ist)
 
@@ -21,23 +22,36 @@ def fetch_pib_news_for_date(date_obj):
     year = date_obj.year
     date_str = date_obj.strftime("%d-%m-%Y")
     
-    print(f"Scraping ALL PIB entries for: {date_str}")
+    print(f"Scraping ALL PIB entries for India Date: {date_str}")
+    # Constructing the exact query matching the live browser filters
     archive_url = f"https://pib.gov.in/AllRelease.aspx?Day={day}&Month={month}&Year={year}&Reg=3&Lang=1"
     
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
     extracted_articles = []
     
     try:
         response = requests.get(archive_url, headers=headers, timeout=15)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            links = soup.find_all('a', href=True)
             
-            for link in links:
-                if "PressReleasePage.aspx" in link['href']:
+            # Target the specific container div that holds the press release links on the live site
+            content_div = soup.find('div', class_='content-area')
+            search_pool = content_div.find_all('a', href=True) if content_div else soup.find_all('a', href=True)
+            
+            for link in search_pool:
+                href = link['href']
+                if "PressReleasePage.aspx" in href or "Pressreleaseshare.aspx" in href:
                     title = link.text.strip()
-                    full_url = f"https://pib.gov.in/{link['href']}"
-                    if title and full_url not in [a['link'] for a in extracted_articles]:
+                    # Reconstruct complete absolute path cleanly
+                    if href.startswith("AllRelease.aspx") or href.startswith("PressReleasePage.aspx") or href.startswith("Pressreleaseshare.aspx"):
+                        full_url = f"https://pib.gov.in/{href}"
+                    else:
+                        full_url = href if href.startswith("http") else f"https://pib.gov.in{href}"
+                        
+                    if title and len(title) > 5 and full_url not in [a['link'] for a in extracted_articles]:
                         extracted_articles.append({
                             "title": title,
                             "link": full_url
@@ -48,11 +62,11 @@ def fetch_pib_news_for_date(date_obj):
     return extracted_articles
 
 def fetch_prs_data():
-    print("Scraping targeted targets from PRS India...")
+    print("Scraping targeted sectors from PRS India...")
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
     prs_items = []
     
-    # Target 1: Parliament Today Tracking Dashboard
+    # 🎯 Target 1: Parliament Today Dashboard
     try:
         parl_url = "https://prsindia.org/"
         resp = requests.get(parl_url, headers=headers, timeout=15)
@@ -69,23 +83,26 @@ def fetch_prs_data():
     except Exception as e:
         print(f"Error parsing PRS Parliament: {e}")
 
-    # Target 2: Monthly Policy Review Archives
+    # 🎯 Target 2: Deep-Scraping Monthly Policy Review Archives
     try:
         policy_url = "https://prsindia.org/policy/monthly-policy-review"
         resp = requests.get(policy_url, headers=headers, timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            policy_links = soup.find_all('a', href=True)
+            all_links = soup.find_all('a', href=True)
+            
             count = 0
-            for link in policy_links:
-                text = link.text.strip()
+            for link in all_links:
                 href = link['href']
-                if "monthly-policy-review" in href and any(m in text for m in ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]):
+                text = link.text.strip()
+                
+                if "monthly-policy-review" in href or "Monthly" in href:
                     full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
-                    if full_url not in [p['link'] for p in prs_items]:
-                        prs_items.append({"title": f"Monthly Policy Review: {text}", "link": full_url})
+                    display_title = text if text else f"Monthly Policy Review Dossier"
+                    if len(display_title) > 10 and full_url not in [p['link'] for p in prs_items]:
+                        prs_items.append({"title": f"Monthly Policy Review: {display_title}", "link": full_url})
                         count += 1
-                        if count >= 3:  # Grabs the top 3 latest monthly documents
+                        if count >= 3: 
                             break
     except Exception as e:
         print(f"Error parsing PRS Monthly Policy: {e}")
@@ -93,7 +110,6 @@ def fetch_prs_data():
     return prs_items
 
 def run_analytical_engine(current_date_str, past_date_str, pib_current, pib_past, prs_data):
-    # Compile everything cleanly into text layout
     raw_material = f"=== [PART 1] LIVE DAILY PIB RELEASES ({current_date_str}) ===\n"
     if not pib_current:
         raw_material += "No raw releases found on the portal for this date.\n"
@@ -134,7 +150,7 @@ def run_analytical_engine(current_date_str, past_date_str, pib_current, pib_past
     =========================================
     🟣 SECTION 3: PRS LEGISLATIVE & POLICY BRIEFING
     =========================================
-    List the items from Part 3 with their respective links and a short summary of the policy document or draft bill.
+    List every single item found in Part 3. Provide the title, their respective links, and a brief description summarizing the policy document or draft bill.
     
     Raw Data Content:
     {raw_material}
@@ -157,7 +173,6 @@ def send_telegram_chunks(text):
             if part.strip():
                 formatted_part = "=========================================\n" + part
                 if len(formatted_part) > 4000:
-                    # Fallback split for massive lists of releases
                     sub_parts = [formatted_part[i:i+4000] for i in range(0, len(formatted_part), 4000)]
                     for sp in sub_parts:
                         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": sp, "parse_mode": "Markdown"})
