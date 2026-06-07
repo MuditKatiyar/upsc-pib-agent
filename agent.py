@@ -12,7 +12,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def get_indian_time():
-    # Forces the cloud container to always use Indian Standard Time calendar rules
     ist = pytz.timezone('Asia/Kolkata')
     return datetime.now(ist)
 
@@ -22,13 +21,12 @@ def fetch_pib_news_for_date(date_obj):
     year = date_obj.year
     date_str = date_obj.strftime("%d-%m-%Y")
     
-    print(f"Scraping ALL PIB entries for India Date: {date_str}")
-    # Constructing the exact query matching the live browser filters
-    archive_url = f"https://pib.gov.in/AllRelease.aspx?Day={day}&Month={month}&Year={year}&Reg=3&Lang=1"
+    print(f"Scraping PIB Archive for Date: {date_str}")
+    # Using the exact URL query structure for the live main archive page
+    archive_url = f"https://pib.gov.in/indexDirect.aspx?Regid=3&Lid=1"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     extracted_articles = []
     
@@ -36,123 +34,92 @@ def fetch_pib_news_for_date(date_obj):
         response = requests.get(archive_url, headers=headers, timeout=15)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
+            links = soup.find_all('a', href=True)
             
-            # Target the specific container div that holds the press release links on the live site
-            content_div = soup.find('div', class_='content-area')
-            search_pool = content_div.find_all('a', href=True) if content_div else soup.find_all('a', href=True)
-            
-            for link in search_pool:
+            for link in links:
                 href = link['href']
-                if "PressReleasePage.aspx" in href or "Pressreleaseshare.aspx" in href:
-                    title = link.text.strip()
-                    # Reconstruct complete absolute path cleanly
-                    if href.startswith("AllRelease.aspx") or href.startswith("PressReleasePage.aspx") or href.startswith("Pressreleaseshare.aspx"):
-                        full_url = f"https://pib.gov.in/{href}"
-                    else:
-                        full_url = href if href.startswith("http") else f"https://pib.gov.in{href}"
-                        
-                    if title and len(title) > 5 and full_url not in [a['link'] for a in extracted_articles]:
-                        extracted_articles.append({
-                            "title": title,
-                            "link": full_url
-                        })
+                title = link.text.strip()
+                if "PressReleasePage.aspx" in href or "ReleaseId=" in href:
+                    if title and len(title) > 10:
+                        full_url = href if href.startswith("http") else f"https://pib.gov.in/{href.lstrip('/')}"
+                        if full_url not in [a['link'] for a in extracted_articles]:
+                            extracted_articles.append({
+                                "title": title,
+                                "link": full_url
+                            })
     except Exception as e:
-        print(f"Error scraping PIB for {date_str}: {e}")
+        print(f"Error reading PIB: {e}")
         
     return extracted_articles
 
 def fetch_prs_data():
-    print("Scraping targeted sectors from PRS India...")
+    print("Scraping direct elements from PRS Policy Archive...")
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
     prs_items = []
     
-    # 🎯 Target 1: Parliament Today Dashboard
     try:
-        parl_url = "https://prsindia.org/"
-        resp = requests.get(parl_url, headers=headers, timeout=15)
+        # Hitting the main monthly policy review archive node directly
+        url = "https://prsindia.org/policy/monthly-policy-review"
+        resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            announcements = soup.find_all('a', href=True)
-            for link in announcements:
-                text = link.text.strip()
-                href = link['href']
-                if any(keyword in text.lower() for keyword in ["draft", "bill", "code", "amendment", "rules", "act"]):
-                    full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
-                    if text and full_url not in [p['link'] for p in prs_items]:
-                        prs_items.append({"title": f"Parliament Section: {text}", "link": full_url})
-    except Exception as e:
-        print(f"Error parsing PRS Parliament: {e}")
-
-    # 🎯 Target 2: Deep-Scraping Monthly Policy Review Archives
-    try:
-        policy_url = "https://prsindia.org/policy/monthly-policy-review"
-        resp = requests.get(policy_url, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            all_links = soup.find_all('a', href=True)
+            links = soup.find_all('a', href=True)
             
-            count = 0
-            for link in all_links:
+            for link in links:
                 href = link['href']
                 text = link.text.strip()
                 
-                if "monthly-policy-review" in href or "Monthly" in href:
-                    full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
-                    display_title = text if text else f"Monthly Policy Review Dossier"
-                    if len(display_title) > 10 and full_url not in [p['link'] for p in prs_items]:
-                        prs_items.append({"title": f"Monthly Policy Review: {display_title}", "link": full_url})
-                        count += 1
-                        if count >= 3: 
-                            break
+                if "monthly-policy-review" in href or "/files/policy/" in href:
+                    if "Review" in text or any(m in text for m in ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]):
+                        full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
+                        if full_url not in [p['link'] for p in prs_items]:
+                            prs_items.append({
+                                "title": text if text else "Monthly Policy Review",
+                                "link": full_url
+                            })
     except Exception as e:
-        print(f"Error parsing PRS Monthly Policy: {e}")
+        print(f"Error reading PRS: {e}")
         
-    return prs_items
+    return prs_items[:5]  # Returns the top 5 most recent monthly review files found
 
 def run_analytical_engine(current_date_str, past_date_str, pib_current, pib_past, prs_data):
-    raw_material = f"=== [PART 1] LIVE DAILY PIB RELEASES ({current_date_str}) ===\n"
-    if not pib_current:
-        raw_material += "No raw releases found on the portal for this date.\n"
+    raw_material = f"=== PART 1: DAILY PIB RELEASES FOR TODAY ({current_date_str}) ===\n"
     for i, a in enumerate(pib_current, 1):
-        raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
+        raw_material += f"[{i}] Title: {a['title']} | Link: {a['link']}\n"
         
-    raw_material += f"\n=== [PART 2] HISTORICAL MONTHLY PIB BACKFILL ({past_date_str}) ===\n"
-    if not pib_past:
-        raw_material += "No raw releases found on the portal for this date.\n"
+    raw_material += f"\n=== PART 2: PREVIOUS MONTH PIB BACKFILL ({past_date_str}) ===\n"
     for i, a in enumerate(pib_past, 1):
-        raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
+        raw_material += f"[{i}] Title: {a['title']} | Link: {a['link']}\n"
         
-    raw_material += f"\n=== [PART 3] TARGETED PRS LEGISLATIVE DOSSIERS ===\n"
-    if not prs_data:
-        raw_material += "No active legislative updates found on the portal dashboard.\n"
+    raw_material += f"\n=== PART 3: PRS MONTHLY POLICY REVIEWS ===\n"
     for i, a in enumerate(prs_data, 1):
-        raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
+        raw_material += f"[{i}] Title: {a['title']} | Link: {a['link']}\n"
 
     upsc_prompt = f"""
-    You are an AI assistant formatting official government data streams. 
-    Do not skip, filter out, or omit any news items from the lists provided below. Process all of them.
+    You are an un-filtered administrative data formatting engine. 
+    Do not pick, choose, skip, or filter any items. Process every single item present in the raw data text.
     
-    Organize the output into these three sections using clean Markdown formatting:
+    Format the complete output using clean Markdown headers:
     
     =========================================
     🔴 SECTION 1: TODAY'S CURRENT AFFAIRS ({current_date_str})
     =========================================
-    List every single item found in Part 1. For each item, output:
-    - 📰 **Heading**: The title of the release.
-    - 🔗 **Source Link**: The official URL.
-    - 📝 **Brief Summary**: A simple 2-3 sentence overview explaining what this notification is about.
+    List every single item found in Part 1. For each item:
+    - 📰 **Heading**: Exact title text.
+    - 🔗 **Link**: URL link.
+    - 📝 **Summary**: A short 2-sentence description of the release.
     
     =========================================
-    🔵 SECTION 2: PREVIOUS MONTH REVISION BACKFILL ({past_date_str})
+    🔵 SECTION 2: PREVIOUS MONTH REVISION ({past_date_str})
     =========================================
-    List every single item found in Part 2 using the exact same style (Heading, Source Link, and Brief Summary).
+    List every single item found in Part 2 formatted exactly like Section 1.
     
     =========================================
-    🟣 SECTION 3: PRS LEGISLATIVE & POLICY BRIEFING
+    🟣 SECTION 3: PRS MONTHLY POLICY HIGHLIGHTS
     =========================================
-    List every single item found in Part 3. Provide the title, their respective links, and a brief description summarizing the policy document or draft bill.
+    List every single item found in Part 3. Provide the full title, direct download link, and a brief overview of what this monthly policy docket updates.
     
-    Raw Data Content:
+    Raw Source Pool:
     {raw_material}
     """
     
@@ -190,9 +157,9 @@ if __name__ == "__main__":
     pib_past_data = fetch_pib_news_for_date(previous_month_ist)
     prs_filtered_data = fetch_prs_data()
     
-    print("Processing all items into the formatting engine...")
+    print("Formatting entire collected data matrix...")
     final_analysis = run_analytical_engine(today_str, past_str, pib_current_data, pib_past_data, prs_filtered_data)
     
-    print("Transmitting raw formatted data stream to Telegram...")
+    print("Transmitting package to Telegram...")
     send_telegram_chunks(final_analysis)
-    print("Pipeline run successfully completed!")
+    print("Execution Finished Successfully!")
