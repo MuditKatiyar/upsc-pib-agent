@@ -21,7 +21,7 @@ def fetch_pib_news_for_date(date_obj):
     year = date_obj.year
     date_str = date_obj.strftime("%d-%m-%Y")
     
-    print(f"Fetching archive data for: {date_str}")
+    print(f"Scraping ALL PIB entries for: {date_str}")
     archive_url = f"https://pib.gov.in/AllRelease.aspx?Day={day}&Month={month}&Year={year}&Reg=3&Lang=1"
     
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
@@ -29,69 +29,114 @@ def fetch_pib_news_for_date(date_obj):
     
     try:
         response = requests.get(archive_url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            return extracted_articles
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            links = soup.find_all('a', href=True)
             
-        soup = BeautifulSoup(response.text, 'html.parser')
-        links = soup.find_all('a', href=True)
-        count = 0
-        
-        for link in links:
-            if "PressReleasePage.aspx" in link['href']:
-                title = link.text.strip()
-                full_url = f"https://pib.gov.in/{link['href']}"
-                if title and full_url not in [a['link'] for a in extracted_articles]:
-                    extracted_articles.append({
-                        "title": title,
-                        "link": full_url
-                    })
-                    count += 1
-                    if count >= 6:  # Limit per day to keep context window precise
-                        break
+            for link in links:
+                if "PressReleasePage.aspx" in link['href']:
+                    title = link.text.strip()
+                    full_url = f"https://pib.gov.in/{link['href']}"
+                    if title and full_url not in [a['link'] for a in extracted_articles]:
+                        extracted_articles.append({
+                            "title": title,
+                            "link": full_url,
+                            "type": "PIB Press Release"
+                        })
     except Exception as e:
-        print(f"Error fetching data for {date_str}: {e}")
+        print(f"Error scraping PIB for {date_str}: {e}")
         
     return extracted_articles
 
-def format_raw_data(title_header, articles):
-    if not articles:
-        return f"\n### {title_header}\nNo significant press releases found for this date.\n"
+def fetch_prs_data():
+    print("Scraping targeted targets from PRS India...")
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+    prs_items = []
     
-    output = f"\n### {title_header}\n"
-    for idx, art in enumerate(articles, 1):
-        output += f"[{idx}] Title: {art['title']}\nLink: {art['link']}\n---\n"
-    return output
+    # Target 1: Parliament Today Tracking Dashboard
+    try:
+        parl_url = "https://prsindia.org/"
+        resp = requests.get(parl_url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            # Look for active links in the announcement/parliament blocks
+            announcements = soup.find_all('a', href=True)
+            for link in announcements:
+                text = link.text.strip()
+                href = link['href']
+                if any(keyword in text.lower() for keyword in ["draft", "bill", "code", "amendment", "rules"]):
+                    full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
+                    if text and full_url not in [p['link'] for p in prs_items]:
+                        prs_items.append({"title": f"Parliament Section: {text}", "link": full_url, "type": "PRS Parliament"})
+    except Exception as e:
+        print(f"Error parsing PRS Parliament: {e}")
 
-def run_analytical_engine(current_date_str, past_date_str, consolidated_data):
+    # Target 2: Monthly Policy Review Archives
+    try:
+        policy_url = "https://prsindia.org/policy/monthly-policy-review"
+        resp = requests.get(policy_url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            policy_links = soup.find_all('a', href=True)
+            count = 0
+            for link in policy_links:
+                text = link.text.strip()
+                href = link['href']
+                if "monthly-policy-review" in href and any(m in text for m in ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]):
+                    full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
+                    if full_url not in [p['link'] for p in prs_items]:
+                        prs_items.append({"title": f"Monthly Policy Review: {text}", "link": full_url, "type": "PRS Monthly Policy"})
+                        count += 1
+                        if count >= 2:  # Grabs the latest monthly dossiers
+                            break
+    except Exception as e:
+        print(f"Error parsing PRS Monthly Policy: {e}")
+        
+    return prs_items
+
+def run_analytical_engine(current_date_str, past_date_str, pib_current, pib_past, prs_data):
+    # Compile text structural map for LLM consumption
+    raw_material = f"=== [PART 1] LIVE DAILY PIB RELEASES ({current_date_str}) ===\n"
+    for i, a in enumerate(pib_current, 1):
+        raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
+        
+    raw_material += f"\n=== [PART 2] HISTORICAL MONTHLY PIB BACKFILL ({past_date_str}) ===\n"
+    for i, a in enumerate(pib_past, 1):
+        raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
+        
+    raw_material += f"\n=== [PART 3] TARGETED PRS LEGISLATIVE DOSSIERS ===\n"
+    for i, a in enumerate(prs_data, 1):
+        raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
+
     upsc_prompt = f"""
     You are an expert civil services mentor specializing in UPSC CSE preparation.
-    Analyze the following official raw text datasets compiled from the Press Information Bureau (PIB).
+    Analyze the raw source text datasets provided. Your objective is to discard routine procedural or political alerts and isolate core concepts applicable directly to GS Paper I, II, and III.
     
-    The dataset contains two parts:
-    1. Current Day Updates ({current_date_str})
-    2. Historical Revision Updates ({past_date_str})
-    
-    Filter out routine administrative announcements or local event updates. Only select items highly relevant to GS Paper I, II, and III.
-    
-    Present your final output clearly split into TWO main parts:
+    Structure your response into THREE pristine, easy-to-read sections:
     
     =========================================
-    🔴 PART A: TODAY'S CURRENT AFFAIRS ({current_date_str})
+    🔴 SECTION 1: TODAY'S CURRENT AFFAIRS ({current_date_str})
     =========================================
-    For each selected item, provide:
-    - 📰 **Heading**: Clear, crisp title.
-    - 📝 **Syllabus Corelation**: GS Paper (I/II/III) and specific micro-topic.
-    - 🧠 **Logical Concept**: Explanation of the core scheme/bill/concept in very simple terms.
-    - 🔍 **Prelims Pointers**: Nodal ministries, dates, targets, important indices or numbers.
-    - ✍️ **Mains Perspective**: Brief structural analysis (2 Pros, 2 Cons, or strategic impacts).
+    Extract and break down the major entries from Part 1 (PIB Today).
+    Format per entry:
+    - 📰 **Heading**: Concise core subject.
+    - 📝 **Syllabus Corelation**: Explicit GS Paper (I/II/III) micro-topic mapping.
+    - 🧠 **Logical Concept**: High-yield, plain-text simplified explanation.
+    - 🔍 **Prelims Pointer Vault**: Ministries, dates, indices, parameters, numbers.
+    - ✍️ **Mains Analytical Angle**: Structural core arguments (2 Pros / 2 Cons or concrete impacts).
     
     =========================================
-    🔵 PART B: PREVIOUS MONTH BACKFILL REVISION ({past_date_str})
+    🔵 SECTION 2: PREVIOUS MONTH REVISION BACKFILL ({past_date_str})
     =========================================
-    Apply the exact same structured layout for the historical items so they can be archived directly into study notes.
+    Process the historical items from Part 2 using the exact same structural template.
+    
+    =========================================
+    🟣 SECTION 3: PRS LEGISLATIVE & POLICY BRIEFING
+    =========================================
+    Extract and process items from Part 3. Focus intensely on highlighting changes in Draft Bills, Acts, Labour Codes, and core observations from the Monthly Policy Reviews that impact state or central governance frameworks.
     
     Raw Source Materials:
-    {consolidated_data}
+    {raw_material}
     """
     
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -102,12 +147,10 @@ def run_analytical_engine(current_date_str, past_date_str, consolidated_data):
     return response.text
 
 def send_telegram_chunks(text):
-    # Telegram character limit safety check (4096 max per message block)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     if len(text) <= 4000:
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
     else:
-        # Split cleanly across headings if the output is extremely descriptive
         parts = text.split("=========================================")
         for part in parts:
             if part.strip():
@@ -115,27 +158,23 @@ def send_telegram_chunks(text):
                 requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": formatted_part, "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
-    # Calculate dates dynamically
     today_ist = get_indian_time()
     previous_month_ist = today_ist - relativedelta(months=1)
     
     today_str = today_ist.strftime("%d-%m-%Y")
     past_str = previous_month_ist.strftime("%d-%m-%Y")
     
-    print(f"Processing Day Cycle: Today ({today_str}) & Previous Month Backfill ({past_str})")
+    # 1. Fetch current and previous month's PIB archives
+    pib_current_data = fetch_pib_news_for_date(today_ist)
+    pib_past_data = fetch_pib_news_for_date(previous_month_ist)
     
-    # Run fetchers
-    current_news = fetch_pib_news_for_date(today_ist)
-    past_news = fetch_pib_news_for_date(previous_month_ist)
+    # 2. Fetch targeted filters from PRS India
+    prs_filtered_data = fetch_prs_data()
     
-    # Consolidate raw text logs
-    compiled_raw_material = format_raw_data(f"Current Releases ({today_str})", current_news)
-    compiled_raw_material += format_raw_data(f"Historical Archive Releases ({past_str})", past_news)
+    # 3. Compile and deliver
+    print("Consolidating datasets and running Gemini processing...")
+    final_analysis = run_analytical_engine(today_str, past_str, pib_current_data, pib_past_data, prs_filtered_data)
     
-    # AI Processing and delivery
-    print("Initiating analytical summary sequence...")
-    final_digest = run_analytical_engine(today_str, past_str, compiled_raw_material)
-    
-    print("Transmitting content blocks to Telegram channel...")
-    send_telegram_chunks(final_digest)
-    print("All tasks executed successfully!")
+    print("Transmitting formatted data stream to Telegram...")
+    send_telegram_chunks(final_analysis)
+    print("Pipeline routine complete!")
