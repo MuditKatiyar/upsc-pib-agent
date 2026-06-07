@@ -40,8 +40,7 @@ def fetch_pib_news_for_date(date_obj):
                     if title and full_url not in [a['link'] for a in extracted_articles]:
                         extracted_articles.append({
                             "title": title,
-                            "link": full_url,
-                            "type": "PIB Press Release"
+                            "link": full_url
                         })
     except Exception as e:
         print(f"Error scraping PIB for {date_str}: {e}")
@@ -59,15 +58,14 @@ def fetch_prs_data():
         resp = requests.get(parl_url, headers=headers, timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Look for active links in the announcement/parliament blocks
             announcements = soup.find_all('a', href=True)
             for link in announcements:
                 text = link.text.strip()
                 href = link['href']
-                if any(keyword in text.lower() for keyword in ["draft", "bill", "code", "amendment", "rules"]):
+                if any(keyword in text.lower() for keyword in ["draft", "bill", "code", "amendment", "rules", "act"]):
                     full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
                     if text and full_url not in [p['link'] for p in prs_items]:
-                        prs_items.append({"title": f"Parliament Section: {text}", "link": full_url, "type": "PRS Parliament"})
+                        prs_items.append({"title": f"Parliament Section: {text}", "link": full_url})
     except Exception as e:
         print(f"Error parsing PRS Parliament: {e}")
 
@@ -85,9 +83,9 @@ def fetch_prs_data():
                 if "monthly-policy-review" in href and any(m in text for m in ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]):
                     full_url = href if href.startswith("http") else f"https://prsindia.org{href}"
                     if full_url not in [p['link'] for p in prs_items]:
-                        prs_items.append({"title": f"Monthly Policy Review: {text}", "link": full_url, "type": "PRS Monthly Policy"})
+                        prs_items.append({"title": f"Monthly Policy Review: {text}", "link": full_url})
                         count += 1
-                        if count >= 2:  # Grabs the latest monthly dossiers
+                        if count >= 3:  # Grabs the top 3 latest monthly documents
                             break
     except Exception as e:
         print(f"Error parsing PRS Monthly Policy: {e}")
@@ -95,47 +93,50 @@ def fetch_prs_data():
     return prs_items
 
 def run_analytical_engine(current_date_str, past_date_str, pib_current, pib_past, prs_data):
-    # Compile text structural map for LLM consumption
+    # Compile everything cleanly into text layout
     raw_material = f"=== [PART 1] LIVE DAILY PIB RELEASES ({current_date_str}) ===\n"
+    if not pib_current:
+        raw_material += "No raw releases found on the portal for this date.\n"
     for i, a in enumerate(pib_current, 1):
         raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
         
     raw_material += f"\n=== [PART 2] HISTORICAL MONTHLY PIB BACKFILL ({past_date_str}) ===\n"
+    if not pib_past:
+        raw_material += "No raw releases found on the portal for this date.\n"
     for i, a in enumerate(pib_past, 1):
         raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
         
     raw_material += f"\n=== [PART 3] TARGETED PRS LEGISLATIVE DOSSIERS ===\n"
+    if not prs_data:
+        raw_material += "No active legislative updates found on the portal dashboard.\n"
     for i, a in enumerate(prs_data, 1):
         raw_material += f"[{i}] {a['title']} - Link: {a['link']}\n"
 
     upsc_prompt = f"""
-    You are an expert civil services mentor specializing in UPSC CSE preparation.
-    Analyze the raw source text datasets provided. Your objective is to discard routine procedural or political alerts and isolate core concepts applicable directly to GS Paper I, II, and III.
+    You are an AI assistant formatting official government data streams. 
+    Do not skip, filter out, or omit any news items from the lists provided below. Process all of them.
     
-    Structure your response into THREE pristine, easy-to-read sections:
+    Organize the output into these three sections using clean Markdown formatting:
     
     =========================================
     🔴 SECTION 1: TODAY'S CURRENT AFFAIRS ({current_date_str})
     =========================================
-    Extract and break down the major entries from Part 1 (PIB Today).
-    Format per entry:
-    - 📰 **Heading**: Concise core subject.
-    - 📝 **Syllabus Corelation**: Explicit GS Paper (I/II/III) micro-topic mapping.
-    - 🧠 **Logical Concept**: High-yield, plain-text simplified explanation.
-    - 🔍 **Prelims Pointer Vault**: Ministries, dates, indices, parameters, numbers.
-    - ✍️ **Mains Analytical Angle**: Structural core arguments (2 Pros / 2 Cons or concrete impacts).
+    List every single item found in Part 1. For each item, output:
+    - 📰 **Heading**: The title of the release.
+    - 🔗 **Source Link**: The official URL.
+    - 📝 **Brief Summary**: A simple 2-3 sentence overview explaining what this notification is about.
     
     =========================================
     🔵 SECTION 2: PREVIOUS MONTH REVISION BACKFILL ({past_date_str})
     =========================================
-    Process the historical items from Part 2 using the exact same structural template.
+    List every single item found in Part 2 using the exact same style (Heading, Source Link, and Brief Summary).
     
     =========================================
     🟣 SECTION 3: PRS LEGISLATIVE & POLICY BRIEFING
     =========================================
-    Extract and process items from Part 3. Focus intensely on highlighting changes in Draft Bills, Acts, Labour Codes, and core observations from the Monthly Policy Reviews that impact state or central governance frameworks.
+    List the items from Part 3 with their respective links and a short summary of the policy document or draft bill.
     
-    Raw Source Materials:
+    Raw Data Content:
     {raw_material}
     """
     
@@ -155,7 +156,13 @@ def send_telegram_chunks(text):
         for part in parts:
             if part.strip():
                 formatted_part = "=========================================\n" + part
-                requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": formatted_part, "parse_mode": "Markdown"})
+                if len(formatted_part) > 4000:
+                    # Fallback split for massive lists of releases
+                    sub_parts = [formatted_part[i:i+4000] for i in range(0, len(formatted_part), 4000)]
+                    for sp in sub_parts:
+                        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": sp, "parse_mode": "Markdown"})
+                else:
+                    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": formatted_part, "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
     today_ist = get_indian_time()
@@ -164,17 +171,13 @@ if __name__ == "__main__":
     today_str = today_ist.strftime("%d-%m-%Y")
     past_str = previous_month_ist.strftime("%d-%m-%Y")
     
-    # 1. Fetch current and previous month's PIB archives
     pib_current_data = fetch_pib_news_for_date(today_ist)
     pib_past_data = fetch_pib_news_for_date(previous_month_ist)
-    
-    # 2. Fetch targeted filters from PRS India
     prs_filtered_data = fetch_prs_data()
     
-    # 3. Compile and deliver
-    print("Consolidating datasets and running Gemini processing...")
+    print("Processing all items into the formatting engine...")
     final_analysis = run_analytical_engine(today_str, past_str, pib_current_data, pib_past_data, prs_filtered_data)
     
-    print("Transmitting formatted data stream to Telegram...")
+    print("Transmitting raw formatted data stream to Telegram...")
     send_telegram_chunks(final_analysis)
-    print("Pipeline routine complete!")
+    print("Pipeline run successfully completed!")
